@@ -18,6 +18,9 @@ class Card:
     def __str__(self):
         return f"{self.rank} of {self.suit}"
 
+    def to_dict(self):
+        return {"rank": self.rank, "suit": self.suit}
+
 
 class Hand:
     def __init__(self, cards):
@@ -36,21 +39,30 @@ class Hand:
         return ", ".join(str(card) for card in self.cards)
 
     def legal_plays(self, led_suit, spades_broken):
-        if self.has_suit(led_suit):
+        # following suit — must play led suit if able
+        if led_suit and self.has_suit(led_suit):
             return [c for c in self.cards if c.suit == led_suit]
+        # void in led suit — can play anything including spades
+        if led_suit:
+            return self.cards
+        # leading — cannot lead spades unless broken or only have spades
         if not spades_broken:
             non_spades = [c for c in self.cards if c.suit != "Spades"]
             if non_spades:
                 return non_spades
         return self.cards
 
+    def to_dict(self):
+        return [card.to_dict() for card in self.cards]
+
 
 class Trick:
-    def __init__(self, spades_broken):
+    def __init__(self, spades_broken, trick_number):
         self.played_cards = []
         self.led_suit = None
         self.spades_broken = spades_broken
         self.winner = None
+        self.trick_number = trick_number
 
     def play_card(self, player, card):
         self.played_cards.append((player, card))
@@ -75,6 +87,18 @@ class Trick:
             self.winner = max(led_suit_cards, key=lambda x: x[1].rank_value())[0]
         return self.winner
 
+    def to_dict(self):
+        return {
+            "trick_number": self.trick_number,
+            "led_suit": self.led_suit,
+            "spades_broken": self.spades_broken,
+            "winner": self.winner.name if self.winner else None,
+            "played_cards": [
+                {"player": player.name, "card": card.to_dict()}
+                for player, card in self.played_cards
+            ]
+        }
+
 
 class Player:
     def __init__(self, name):
@@ -86,8 +110,16 @@ class Player:
     def make_bid(self):
         raise NotImplementedError
 
-    def choose_card(self, trick, spades_broken):
+    def choose_card(self, trick, spades_broken, trick_counts):
         raise NotImplementedError
+
+    def to_dict(self):
+        return {
+            "name": self.name,
+            "bid": self.bid,
+            "tricks_won": self.tricks_won,
+            "hand": self.hand.to_dict() if self.hand else []
+        }
 
 
 class HumanPlayer(Player):
@@ -105,9 +137,11 @@ class HumanPlayer(Player):
                 break
             print("Invalid bid. Must be between 0 and 13.")
 
-    def choose_card(self, trick, spades_broken):
+    def choose_card(self, trick, spades_broken, trick_counts):
         legal = self.hand.legal_plays(trick.led_suit, spades_broken)
+        tricks_needed = self.bid - trick_counts[self]
         print(f"\n{self.name}'s turn")
+        print(f"Bid: {self.bid} | Tricks won: {trick_counts[self]} | Still needed: {max(0, tricks_needed)}")
         print("Your hand:")
         for card in self.hand.cards:
             print(f"  {card}")
@@ -122,20 +156,68 @@ class HumanPlayer(Player):
                 return selected
             print(f"Invalid choice. Please enter a number between 0 and {len(legal) - 1}.")
 
+
 class RuleBasedBot(Player):
     def __init__(self, name):
         super().__init__(name)
 
     def make_bid(self):
-        self.bid = random.randint(0, 13)
+        temporary_bid = 0
+        for card in self.hand.cards:
+            if card.rank_value() == 12:
+                temporary_bid += 1
+            if card.suit == "Spades" and card.rank_value() > 6:
+                temporary_bid += 1
+        self.bid = temporary_bid
         print(f"\n{self.name} bids {self.bid}")
 
-    def choose_card(self, trick, spades_broken):
+    def choose_card(self, trick, spades_broken, trick_counts):
         legal = self.hand.legal_plays(trick.led_suit, spades_broken)
         print(f"\n{self.name}'s turn")
-        selected = random.choice(legal)
+
+        tricks_needed = self.bid - trick_counts[self]
+
+        spade_already_played = (
+            trick.led_suit != "Spades" and
+            any(card.suit == "Spades" for _, card in trick.played_cards)
+        )
+
+        if self.bid == 0:
+            selected = min(legal, key=lambda c: c.rank_value())
+
+        elif tricks_needed <= 0:
+            if trick.led_suit and self.hand.has_suit(trick.led_suit):
+                led_cards = [c for c in legal if c.suit == trick.led_suit]
+                selected = min(led_cards, key=lambda c: c.rank_value())
+            else:
+                non_spades = [c for c in legal if c.suit != "Spades"]
+                if non_spades:
+                    selected = max(non_spades, key=lambda c: c.rank_value())
+                else:
+                    selected = min(legal, key=lambda c: c.rank_value())
+
+        else:
+            if spade_already_played:
+                selected = min(legal, key=lambda c: c.rank_value())
+            elif trick.led_suit is None:
+                non_spades = [c for c in legal if c.suit != "Spades"]
+                if non_spades:
+                    selected = max(non_spades, key=lambda c: c.rank_value())
+                else:
+                    selected = max(legal, key=lambda c: c.rank_value())
+            elif not self.hand.has_suit(trick.led_suit) and not spades_broken:
+                spades = [c for c in legal if c.suit == "Spades"]
+                if spades:
+                    selected = min(spades, key=lambda c: c.rank_value())
+                else:
+                    selected = max(legal, key=lambda c: c.rank_value())
+            else:
+                selected = max(legal, key=lambda c: c.rank_value())
+
         print(f"{self.name} plays: {selected}")
+        self.hand.play_card(selected)
         return selected
+
 
 class Round:
     def __init__(self, players, round_number, first_leader, first_bidder):
@@ -148,7 +230,9 @@ class Round:
         self.current_trick = None
         self.spades_broken = False
         self.played_cards_history = []
+        self.tricks_history = []
         self.trick_counts = {player: 0 for player in players}
+        self.bids = {}
 
     def deal(self):
         deck = []
@@ -166,20 +250,35 @@ class Round:
                     self.players[:self.players.index(self.first_bidder)]
         for player in bid_order:
             player.make_bid()
+            self.bids[player.name] = player.bid
 
     def play_trick(self):
-        self.current_trick = Trick(self.spades_broken)
+        self.current_trick = Trick(self.spades_broken, self.tricks_played + 1)
         leader = self.current_leader
         play_order = self.players[self.players.index(leader):] + \
                      self.players[:self.players.index(leader)]
         for player in play_order:
-            card = player.choose_card(self.current_trick, self.spades_broken)
+            card = player.choose_card(
+                self.current_trick,
+                self.current_trick.spades_broken,
+                self.trick_counts
+            )
             self.current_trick.play_card(player, card)
-            self.played_cards_history.append(card)
+            self.spades_broken = self.current_trick.spades_broken
+            self.played_cards_history.append((player.name, card.to_dict()))
         self.current_trick.determine_winner()
-        self.current_leader = self.current_trick.winner
-        self.trick_counts[self.current_trick.winner] += 1
-        self.spades_broken = self.current_trick.spades_broken
+        winner = self.current_trick.winner
+        winning_card = max(
+            [card for _, card in self.current_trick.played_cards
+             if card.suit == "Spades"] or
+            [card for _, card in self.current_trick.played_cards
+             if card.suit == self.current_trick.led_suit],
+            key=lambda c: c.rank_value()
+        )
+        print(f"\n--- {winner.name} wins trick {self.tricks_played + 1} with {winning_card} ---")
+        self.current_leader = winner
+        self.trick_counts[winner] += 1
+        self.tricks_history.append(self.current_trick)
         self.tricks_played += 1
 
     def is_complete(self):
@@ -190,6 +289,16 @@ class Round:
         self.collect_bids()
         while not self.is_complete():
             self.play_trick()
+
+    def to_dict(self):
+        return {
+            "round_number": self.round_number,
+            "bids": self.bids,
+            "trick_counts": {p.name: self.trick_counts[p] for p in self.players},
+            "spades_broken": self.spades_broken,
+            "tricks_history": [t.to_dict() for t in self.tricks_history],
+            "played_cards_history": self.played_cards_history
+        }
 
 
 class Game:
@@ -253,6 +362,15 @@ class Game:
 
     def is_game_over(self):
         return self.round_number > 8
+
+    def to_dict(self):
+        return {
+            "scores": {p.name: self.scores[p] for p in self.players},
+            "bags": {p.name: self.bags[p] for p in self.players},
+            "round_number": self.round_number,
+            "players": [p.to_dict() for p in self.players],
+            "rounds_history": [r.to_dict() for r in self.rounds_history]
+        }
 
     def play_game(self):
         print("Welcome to Spades!")
