@@ -7,6 +7,9 @@ app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 game = Game()
+for player in game.players:
+    player._game_ref = game
+
 first = game.players[game.first_bidder_index % 4]
 current_round = Round(game.players, game.round_number, first, first)
 current_round.deal()
@@ -14,6 +17,9 @@ current_round.deal()
 server_phase = "bidding"
 trick_winner_message = None
 round_results = None
+bots_before = []
+bots_after = []
+
 
 def get_state():
     player1 = game.players[0]
@@ -52,6 +58,18 @@ def get_state():
         "round_results": round_results
     }
 
+
+def collect_bids_around_human():
+    global bots_before, bots_after
+    player1 = game.players[0]
+    bid_order = (
+        current_round.players[current_round.players.index(current_round.first_bidder):] +
+        current_round.players[:current_round.players.index(current_round.first_bidder)]
+    )
+    bots_before = [p for p in bid_order[:bid_order.index(player1)]]
+    bots_after = [p for p in bid_order[bid_order.index(player1) + 1:]]
+
+
 def score_current_round():
     global round_results
     results = []
@@ -86,9 +104,8 @@ def score_current_round():
             results.append(f"{player.name}: missed bid of {bid} — -{points} pts")
     round_results = results
 
-async def play_bots_until_human(websocket):
-    global trick_winner_message
 
+async def play_bots_until_human(websocket):
     play_order = (
         current_round.players[current_round.players.index(current_round.current_leader):] +
         current_round.players[:current_round.players.index(current_round.current_leader)]
@@ -108,11 +125,12 @@ async def play_bots_until_human(websocket):
         )
         current_round.current_trick.play_card(player, card)
         current_round.spades_broken = current_round.current_trick.spades_broken
-        current_round.played_cards_history.append((player.name, card.to_dict()))
+        current_round.played_cards_history.append((player.name, card.to_dict(), card))
         await websocket.send_json(get_state())
         await asyncio.sleep(0.8)
 
     await resolve_trick(websocket)
+
 
 async def resolve_trick(websocket):
     global trick_winner_message, server_phase
@@ -141,11 +159,31 @@ async def resolve_trick(websocket):
 
     await websocket.send_json(get_state())
 
+
+def reset_game():
+    global game, current_round, server_phase, trick_winner_message, round_results
+    game = Game()
+    for player in game.players:
+        player._game_ref = game
+        player.bid = None
+    first = game.players[game.first_bidder_index % 4]
+    current_round = Round(game.players, game.round_number, first, first)
+    current_round.deal()
+    server_phase = "bidding"
+    trick_winner_message = None
+    round_results = None
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     global server_phase, trick_winner_message, current_round, round_results
 
     await websocket.accept()
+
+    collect_bids_around_human()
+    for bot in bots_before:
+        bot.make_bid()
+
     await websocket.send_json(get_state())
 
     while True:
@@ -153,7 +191,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
         if data["action"] == "bid" and server_phase == "bidding":
             game.players[0].bid = data["value"]
-            for bot in game.players[1:]:
+            for bot in bots_after:
                 bot.make_bid()
             server_phase = "playing"
             current_round.current_trick = Trick(current_round.spades_broken, 1)
@@ -161,8 +199,11 @@ async def websocket_endpoint(websocket: WebSocket):
             await play_bots_until_human(websocket)
 
         elif data["action"] == "play_card" and server_phase == "playing":
-            trick_winner_message = None
+            if "card" not in data:
+                await websocket.send_json(get_state())
+                continue
 
+            trick_winner_message = None
             card_data = data["card"]
             player1 = game.players[0]
 
@@ -183,7 +224,9 @@ async def websocket_endpoint(websocket: WebSocket):
             current_round.current_trick.play_card(player1, selected_card)
             current_round.spades_broken = current_round.current_trick.spades_broken
             player1.hand.play_card(selected_card)
-            current_round.played_cards_history.append((player1.name, selected_card.to_dict()))
+            current_round.played_cards_history.append(
+                (player1.name, selected_card.to_dict(), selected_card)
+            )
 
             await websocket.send_json(get_state())
             await asyncio.sleep(0.8)
@@ -204,5 +247,22 @@ async def websocket_endpoint(websocket: WebSocket):
             first = game.players[game.first_bidder_index % 4]
             current_round = Round(game.players, game.round_number, first, first)
             current_round.deal()
+
+            for player in game.players:
+                player._game_ref = game
+                player.bid = None
+
             server_phase = "bidding"
+
+            collect_bids_around_human()
+            for bot in bots_before:
+                bot.make_bid()
+
+            await websocket.send_json(get_state())
+
+        elif data["action"] == "play_again":
+            reset_game()
+            collect_bids_around_human()
+            for bot in bots_before:
+                bot.make_bid()
             await websocket.send_json(get_state())

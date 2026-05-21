@@ -106,6 +106,8 @@ class Player:
         self.hand = None
         self.bid = None
         self.tricks_won = 0
+        self._game_ref = None
+        self._round_ref = None
 
     def make_bid(self):
         raise NotImplementedError
@@ -169,11 +171,9 @@ class RuleBasedBot(Player):
             if card.suit == "Spades" and card.rank_value() > 6:
                 temporary_bid += 1
         self.bid = temporary_bid
-        print(f"\n{self.name} bids {self.bid}")
 
     def choose_card(self, trick, spades_broken, trick_counts):
         legal = self.hand.legal_plays(trick.led_suit, spades_broken)
-        print(f"\n{self.name}'s turn")
 
         tricks_needed = self.bid - trick_counts[self]
 
@@ -214,9 +214,71 @@ class RuleBasedBot(Player):
             else:
                 selected = max(legal, key=lambda c: c.rank_value())
 
-        print(f"{self.name} plays: {selected}")
         self.hand.play_card(selected)
         return selected
+
+
+class RLAgent(Player):
+    def __init__(self, name, model_path="spades_agent"):
+        super().__init__(name)
+        from sb3_contrib import MaskablePPO
+        from SpadesEnv import SpadesEnv
+        self.model = MaskablePPO.load(model_path)
+        self.env = SpadesEnv()
+
+    def _build_bidding_obs(self):
+        import numpy as np
+        from SpadesEnv import card_to_index
+        obs = np.zeros(167, dtype=np.float32)
+        for card in self.hand.cards:
+            obs[card_to_index(card)] = 1.0
+        obs[166] = 1.0  # is_bidding flag
+        return obs
+
+    def _build_bidding_mask(self):
+        import numpy as np
+        mask = np.zeros(52, dtype=bool)
+        for i in range(14):
+            mask[i] = True
+        return mask
+
+    def make_bid(self):
+        # if round ref not set or no current trick yet use hand-only observation
+        if self._round_ref is None or self._round_ref.current_trick is None:
+            obs = self._build_bidding_obs()
+            mask = self._build_bidding_mask()
+        else:
+            self.env.game = self._game_ref
+            self.env.current_round = self._round_ref
+            self.env.agent = self
+            self.env.is_bidding = True
+            obs = self.env._get_observation()
+            mask = self.env._get_action_mask()
+        action, _ = self.model.predict(obs, action_masks=mask, deterministic=True)
+        self.bid = min(int(action), 13)
+        print(f"\n{self.name} (RL) bids {self.bid}")
+
+    def choose_card(self, trick, spades_broken, trick_counts):
+        from SpadesEnv import index_to_card
+        self.env.game = self._game_ref
+        self.env.current_round = self._round_ref
+        self.env.agent = self
+        self.env.is_bidding = False
+        obs = self.env._get_observation()
+        mask = self.env._get_action_mask()
+        action, _ = self.model.predict(obs, action_masks=mask, deterministic=True)
+        card = index_to_card(int(action))
+        matching = next(
+            (c for c in self.hand.cards
+             if c.rank == card.rank and c.suit == card.suit),
+            None
+        )
+        if matching is None:
+            legal = self.hand.legal_plays(trick.led_suit, spades_broken)
+            matching = random.choice(legal)
+        self.hand.play_card(matching)
+        print(f"\n{self.name} (RL) plays: {matching}")
+        return matching
 
 
 class Round:
@@ -244,6 +306,9 @@ class Round:
         self.players[1].hand = Hand(deck[13:26])
         self.players[2].hand = Hand(deck[26:39])
         self.players[3].hand = Hand(deck[39:52])
+        # set round ref after dealing so RL agent can access it during bidding
+        for player in self.players:
+            player._round_ref = self
 
     def collect_bids(self):
         bid_order = self.players[self.players.index(self.first_bidder):] + \
@@ -253,6 +318,10 @@ class Round:
             self.bids[player.name] = player.bid
 
     def play_trick(self):
+        # update round ref on all players before each trick
+        for player in self.players:
+            player._round_ref = self
+
         self.current_trick = Trick(self.spades_broken, self.tricks_played + 1)
         leader = self.current_leader
         play_order = self.players[self.players.index(leader):] + \
@@ -265,7 +334,7 @@ class Round:
             )
             self.current_trick.play_card(player, card)
             self.spades_broken = self.current_trick.spades_broken
-            self.played_cards_history.append((player.name, card.to_dict()))
+            self.played_cards_history.append((player.name, card.to_dict(), card))
         self.current_trick.determine_winner()
         winner = self.current_trick.winner
         winning_card = max(
@@ -297,18 +366,28 @@ class Round:
             "trick_counts": {p.name: self.trick_counts[p] for p in self.players},
             "spades_broken": self.spades_broken,
             "tricks_history": [t.to_dict() for t in self.tricks_history],
-            "played_cards_history": self.played_cards_history
+            "played_cards_history": [
+                (name, card_dict) for name, card_dict, _ in self.played_cards_history
+            ]
         }
 
 
 class Game:
-    def __init__(self):
-        self.players = [
-            HumanPlayer("Player 1"),
-            RuleBasedBot("Player 2"),
-            RuleBasedBot("Player 3"),
-            RuleBasedBot("Player 4")
-        ]
+    def __init__(self, mode="human"):
+        if mode == "human":
+            self.players = [
+                HumanPlayer("Player 1"),
+                RLAgent("RL Bot"),
+                RuleBasedBot("Player 3"),
+                RuleBasedBot("Player 4")
+            ]
+        elif mode == "training":
+            self.players = [
+                RuleBasedBot("Agent"),
+                RuleBasedBot("Bot 1"),
+                RuleBasedBot("Bot 2"),
+                RuleBasedBot("Bot 3")
+            ]
         self.scores = {player: 0 for player in self.players}
         self.bags = {player: 0 for player in self.players}
         self.round_number = 1
@@ -316,6 +395,10 @@ class Game:
         self.rounds_history = []
 
     def start_round(self):
+        # set game ref on all players before each round
+        for player in self.players:
+            player._game_ref = self
+
         first = self.players[self.first_bidder_index % 4]
         current_round = Round(self.players, self.round_number, first, first)
         current_round.play_round()
@@ -385,5 +468,5 @@ class Game:
 
 
 if __name__ == "__main__":
-    game = Game()
+    game = Game(mode="human")
     game.play_game()

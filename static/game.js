@@ -1,4 +1,4 @@
-const BACKGROUND = "#101010"
+const BACKGROUND = "#35654d"
 const cardW = 80
 const cardH = 120
 const cardY = 670
@@ -100,6 +100,11 @@ game.addEventListener("click", (e) => {
             e.clientY > btnY && e.clientY < btnY + 50) {
             if (gamePhase === "round_over") {
                 ws.send(JSON.stringify({action: "next_round"}))
+            } else if (gamePhase === "game_over") {
+                ws.send(JSON.stringify({action: "play_again"}))
+                gamePhase = "bidding"
+                currentBid = 0
+                selectedIndex = null
             }
         }
         return
@@ -108,10 +113,17 @@ game.addEventListener("click", (e) => {
 
 function draw_card(rank, suit, x, y, elevated, legal = true) {
     const drawY = elevated ? y - 20 : y
-    ctx.fillStyle = legal ? "white" : "#555555"
+    ctx.fillStyle = legal ? "white" : "#2d5a40"
     ctx.fillRect(x, drawY, cardW, cardH)
+
+    if (!legal) {
+        ctx.strokeStyle = "#1a3d2b"
+        ctx.lineWidth = 2
+        ctx.strokeRect(x, drawY, cardW, cardH)
+    }
+
     ctx.font = "20px Arial"
-    ctx.fillStyle = legal ? SUIT_COLORS[suit] : "#888888"
+    ctx.fillStyle = legal ? SUIT_COLORS[suit] : "#4a7a5a"
     ctx.fillText(rank, x + 8, drawY + 24)
     ctx.fillText(SUITS[suit], x + 8, drawY + 48)
 }
@@ -120,14 +132,14 @@ function draw_bid_selector() {
     const centerX = game.width / 2
     const centerY = game.height / 2
 
-    ctx.fillStyle = "rgba(0, 0, 0, 0.7)"
-    ctx.fillRect(centerX - 100, centerY - 120, 200, 220)
+    ctx.fillStyle = "rgba(0, 0, 0, 0.75)"
+    ctx.fillRect(centerX - 110, centerY - 130, 220, 240)
 
     ctx.fillStyle = "white"
     ctx.font = "24px Arial"
-    ctx.fillText("Your Bid:", centerX - 50, centerY - 80)
+    ctx.fillText("Your Bid:", centerX - 50, centerY - 88)
 
-    ctx.fillText("▲", centerX - 10, centerY - 40)
+    ctx.fillText("▲", centerX - 10, centerY - 44)
 
     ctx.font = "48px Arial"
     ctx.fillText(currentBid, centerX - 14, centerY + 10)
@@ -144,9 +156,7 @@ function draw_bid_selector() {
 
 function draw_player_info() {
     if (!players) return
-    ctx.font = "16px Arial"
     for (let i = 0; i < players.length; i++) {
-        const bid = players[i].bid !== null ? players[i].bid : "?"
         const tricks = trickCounts[players[i].name] !== undefined
             ? trickCounts[players[i].name] : 0
         const bid_num = players[i].bid !== null ? players[i].bid : 0
@@ -155,11 +165,30 @@ function draw_player_info() {
         const bag = bags[players[i].name] !== undefined
             ? bags[players[i].name] : 0
 
-        ctx.fillStyle = "white"
+        let bidDisplay
+        if (gamePhase === "bidding") {
+            if (players[i].bid !== null) {
+                bidDisplay = players[i].bid
+            } else {
+                bidDisplay = "?"
+            }
+        } else {
+            bidDisplay = players[i].bid !== null ? players[i].bid : "?"
+        }
+
+        ctx.fillStyle = "rgba(0, 0, 0, 0.45)"
+        ctx.fillRect(14 + i * 280, 8, 260, 66)
+
+        ctx.font = "bold 16px Arial"
+        ctx.fillStyle = "#ffffff"
         ctx.fillText(`${players[i].name}`, 20 + i * 280, 24)
-        ctx.fillStyle = "#aaaaaa"
-        ctx.fillText(`Bid: ${bid} | Score: ${score} | Bags: ${bag}`, 20 + i * 280, 44)
-        ctx.fillStyle = tricks > bid_num ? "#e94560" : "#4caf50"
+
+        ctx.font = "14px Arial"
+        ctx.fillStyle = "#dddddd"
+        ctx.fillText(`Bid: ${bidDisplay} | Score: ${score} | Bags: ${bag}`, 20 + i * 280, 44)
+
+        ctx.fillStyle = tricks > bid_num ? "#ff4444" : "#44ff88"
+        ctx.font = "bold 14px Arial"
         ctx.fillText(`Tricks: ${tricks}`, 20 + i * 280, 64)
     }
 }
@@ -181,18 +210,20 @@ function draw_trick() {
         const card = currentTrick[i].card
         const pos = positions[i]
         draw_card(card.rank, card.suit, pos.x, pos.y, false, true)
-        ctx.fillStyle = "#aaaaaa"
+        ctx.fillStyle = "rgba(0, 0, 0, 0.6)"
+        ctx.fillRect(pos.x, pos.y - 18, 80, 18)
+        ctx.fillStyle = "#ffffff"
         ctx.font = "12px Arial"
-        ctx.fillText(currentTrick[i].player, pos.x, pos.y - 4)
+        ctx.fillText(currentTrick[i].player, pos.x + 4, pos.y - 4)
     }
 }
 
 function draw_trick_winner() {
     if (!trickWinner) return
-    ctx.fillStyle = "rgba(0, 0, 0, 0.6)"
+    ctx.fillStyle = "rgba(0, 0, 0, 0.7)"
     ctx.fillRect(game.width / 2 - 200, game.height / 2 - 30, 400, 60)
-    ctx.fillStyle = "#4caf50"
-    ctx.font = "32px Arial"
+    ctx.fillStyle = "#44ff88"
+    ctx.font = "bold 32px Arial"
     ctx.fillText(trickWinner, game.width / 2 - 180, game.height / 2 + 14)
 }
 
@@ -200,33 +231,48 @@ function draw_play_button() {
     if (selectedIndex === null) return
     const btnX = game.width / 2 - 60
     const btnY = cardY - 80
-    ctx.fillStyle = "#e94560"
+    ctx.fillStyle = "#c0392b"
     ctx.fillRect(btnX, btnY, 120, 40)
     ctx.fillStyle = "white"
-    ctx.font = "20px Arial"
-    ctx.fillText("Play Card", btnX + 10, btnY + 26)
+    ctx.font = "bold 20px Arial"
+    ctx.fillText("Play Card", btnX + 8, btnY + 26)
 }
 
 function draw_round_over() {
     const centerX = game.width / 2
     const centerY = game.height / 2
 
-    ctx.fillStyle = "rgba(0, 0, 0, 0.85)"
+    ctx.fillStyle = "rgba(0, 0, 0, 0.88)"
     ctx.fillRect(centerX - 300, centerY - 220, 600, 480)
 
     ctx.fillStyle = "white"
-    ctx.font = "28px Arial"
-    ctx.fillText(`Round ${roundNumber} Results`, centerX - 120, centerY - 180)
+    ctx.font = "bold 28px Arial"
+
+    if (gamePhase === "game_over") {
+        ctx.fillText("Game Over!", centerX - 80, centerY - 180)
+        if (players && Object.keys(scores).length > 0) {
+            const winner = players.reduce((a, b) =>
+                (scores[a.name] || 0) > (scores[b.name] || 0) ? a : b
+            )
+            ctx.fillStyle = "#44ff88"
+            ctx.font = "22px Arial"
+            ctx.fillText(
+                `${winner.name} wins with ${scores[winner.name]} pts!`,
+                centerX - 180, centerY - 140
+            )
+        }
+    } else {
+        ctx.fillText(`Round ${roundNumber} Results`, centerX - 130, centerY - 180)
+    }
 
     if (roundResults) {
-        ctx.font = "18px Arial"
+        ctx.font = "17px Arial"
         for (let i = 0; i < roundResults.length; i++) {
-            ctx.fillStyle = "#aaaaaa"
+            ctx.fillStyle = "#cccccc"
             ctx.fillText(roundResults[i], centerX - 270, centerY - 130 + i * 36)
         }
     }
 
-    // scores summary
     ctx.font = "18px Arial"
     let y = centerY + 60
     ctx.fillStyle = "white"
@@ -236,19 +282,24 @@ function draw_round_over() {
         for (let i = 0; i < players.length; i++) {
             const score = scores[players[i].name] || 0
             const bag = bags[players[i].name] || 0
-            ctx.fillStyle = "#4caf50"
-            ctx.fillText(`${players[i].name}: ${score} pts | ${bag} bags`, centerX - 270, y)
+            ctx.fillStyle = "#44ff88"
+            ctx.fillText(
+                `${players[i].name}: ${score} pts | ${bag} bags`,
+                centerX - 270, y
+            )
             y += 28
         }
     }
 
-    // next round button
-    const btnLabel = gamePhase === "game_over" ? "Game Over" : "Next Round"
-    ctx.fillStyle = gamePhase === "game_over" ? "#555555" : "#4caf50"
+    const btnLabel = gamePhase === "game_over" ? "Play Again" : "Next Round"
+    ctx.fillStyle = "#2e7d32"
     ctx.fillRect(centerX - 80, centerY + 200, 160, 50)
+    ctx.strokeStyle = "#44ff88"
+    ctx.lineWidth = 2
+    ctx.strokeRect(centerX - 80, centerY + 200, 160, 50)
     ctx.fillStyle = "white"
-    ctx.font = "20px Arial"
-    ctx.fillText(btnLabel, centerX - 50, centerY + 232)
+    ctx.font = "bold 20px Arial"
+    ctx.fillText(btnLabel, centerX - 48, centerY + 232)
 }
 
 function draw_hand() {
@@ -300,6 +351,11 @@ ws.onmessage = (event) => {
 
     if (state.phase) {
         gamePhase = state.phase
+    }
+
+    // clear selection when round ends
+    if (gamePhase === "round_over" || gamePhase === "game_over") {
+        selectedIndex = null
     }
 
     if (gamePhase === "bidding") {
