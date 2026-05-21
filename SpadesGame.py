@@ -39,13 +39,10 @@ class Hand:
         return ", ".join(str(card) for card in self.cards)
 
     def legal_plays(self, led_suit, spades_broken):
-        # following suit — must play led suit if able
         if led_suit and self.has_suit(led_suit):
             return [c for c in self.cards if c.suit == led_suit]
-        # void in led suit — can play anything including spades
         if led_suit:
             return self.cards
-        # leading — cannot lead spades unless broken or only have spades
         if not spades_broken:
             non_spades = [c for c in self.cards if c.suit != "Spades"]
             if non_spades:
@@ -75,10 +72,6 @@ class Trick:
         return len(self.played_cards) == 4
 
     def determine_winner(self):
-        # check if any spades were played since the highest of those cards would be the winner
-        # lambda function is there to pull just the card from the (player, card) combined data
-        # when applying the max() function for comparison
-        # the [0] at the end says to only store the player in the winner variable
         spades_played = [(player, card) for player, card in self.played_cards if card.suit == "Spades"]
         if spades_played:
             self.winner = max(spades_played, key=lambda x: x[1].rank_value())[0]
@@ -120,7 +113,8 @@ class Player:
             "name": self.name,
             "bid": self.bid,
             "tricks_won": self.tricks_won,
-            "hand": self.hand.to_dict() if self.hand else []
+            "hand": self.hand.to_dict() if self.hand else [],
+            "type": self.__class__.__name__
         }
 
 
@@ -129,34 +123,10 @@ class HumanPlayer(Player):
         super().__init__(name)
 
     def make_bid(self):
-        print(f"\n{self.name}, your hand is:")
-        for card in self.hand.cards:
-            print(f"  {card}")
-        while True:
-            bid = int(input(f"\n{self.name}, enter your bid (0-13): "))
-            if 0 <= bid <= 13:
-                self.bid = bid
-                break
-            print("Invalid bid. Must be between 0 and 13.")
+        pass
 
     def choose_card(self, trick, spades_broken, trick_counts):
-        legal = self.hand.legal_plays(trick.led_suit, spades_broken)
-        tricks_needed = self.bid - trick_counts[self]
-        print(f"\n{self.name}'s turn")
-        print(f"Bid: {self.bid} | Tricks won: {trick_counts[self]} | Still needed: {max(0, tricks_needed)}")
-        print("Your hand:")
-        for card in self.hand.cards:
-            print(f"  {card}")
-        print("\nLegal plays:")
-        for i, card in enumerate(legal):
-            print(f"  {i}: {card}")
-        while True:
-            choice = int(input("Choose a card by number: "))
-            if 0 <= choice < len(legal):
-                selected = legal[choice]
-                self.hand.play_card(selected)
-                return selected
-            print(f"Invalid choice. Please enter a number between 0 and {len(legal) - 1}.")
+        pass
 
 
 class RuleBasedBot(Player):
@@ -232,7 +202,7 @@ class RLAgent(Player):
         obs = np.zeros(167, dtype=np.float32)
         for card in self.hand.cards:
             obs[card_to_index(card)] = 1.0
-        obs[166] = 1.0  # is_bidding flag
+        obs[166] = 1.0
         return obs
 
     def _build_bidding_mask(self):
@@ -243,7 +213,6 @@ class RLAgent(Player):
         return mask
 
     def make_bid(self):
-        # if round ref not set or no current trick yet use hand-only observation
         if self._round_ref is None or self._round_ref.current_trick is None:
             obs = self._build_bidding_obs()
             mask = self._build_bidding_mask()
@@ -256,7 +225,6 @@ class RLAgent(Player):
             mask = self.env._get_action_mask()
         action, _ = self.model.predict(obs, action_masks=mask, deterministic=True)
         self.bid = min(int(action), 13)
-        print(f"\n{self.name} (RL) bids {self.bid}")
 
     def choose_card(self, trick, spades_broken, trick_counts):
         from SpadesEnv import index_to_card
@@ -277,7 +245,6 @@ class RLAgent(Player):
             legal = self.hand.legal_plays(trick.led_suit, spades_broken)
             matching = random.choice(legal)
         self.hand.play_card(matching)
-        print(f"\n{self.name} (RL) plays: {matching}")
         return matching
 
 
@@ -306,7 +273,6 @@ class Round:
         self.players[1].hand = Hand(deck[13:26])
         self.players[2].hand = Hand(deck[26:39])
         self.players[3].hand = Hand(deck[39:52])
-        # set round ref after dealing so RL agent can access it during bidding
         for player in self.players:
             player._round_ref = self
 
@@ -318,7 +284,6 @@ class Round:
             self.bids[player.name] = player.bid
 
     def play_trick(self):
-        # update round ref on all players before each trick
         for player in self.players:
             player._round_ref = self
 
@@ -373,21 +338,29 @@ class Round:
 
 
 class Game:
-    def __init__(self, mode="human"):
-        if mode == "human":
-            self.players = [
-                HumanPlayer("Player 1"),
-                RLAgent("RL Bot"),
-                RuleBasedBot("Player 3"),
-                RuleBasedBot("Player 4")
-            ]
-        elif mode == "training":
-            self.players = [
-                RuleBasedBot("Agent"),
-                RuleBasedBot("Bot 1"),
-                RuleBasedBot("Bot 2"),
-                RuleBasedBot("Bot 3")
-            ]
+    def __init__(self, config=None):
+        if config is None:
+            config = {"humans": 1, "rl_agents": 1, "bots": 2}
+
+        assert config["humans"] + config["rl_agents"] + config["bots"] == 4, \
+            "Must have exactly 4 players"
+
+        self.players = []
+        player_num = 1
+
+        for _ in range(config["humans"]):
+            self.players.append(HumanPlayer(f"Player {player_num}"))
+            player_num += 1
+
+        for _ in range(config["rl_agents"]):
+            self.players.append(RLAgent(f"RL Agent {player_num}"))
+            player_num += 1
+
+        for _ in range(config["bots"]):
+            self.players.append(RuleBasedBot(f"Bot {player_num}"))
+            player_num += 1
+
+        self.config = config
         self.scores = {player: 0 for player in self.players}
         self.bags = {player: 0 for player in self.players}
         self.round_number = 1
@@ -395,7 +368,6 @@ class Game:
         self.rounds_history = []
 
     def start_round(self):
-        # set game ref on all players before each round
         for player in self.players:
             player._game_ref = self
 
@@ -468,5 +440,5 @@ class Game:
 
 
 if __name__ == "__main__":
-    game = Game(mode="human")
+    game = Game(config={"humans": 1, "rl_agents": 0, "bots": 3})
     game.play_game()
