@@ -23,7 +23,7 @@ def main():
     )
 
     print("Starting training...")
-    model.learn(total_timesteps=1_000_000)
+    model.learn(total_timesteps=20_000_000)
     model.save("spades_agent")
     print("Training complete — model saved to spades_agent.zip")
 

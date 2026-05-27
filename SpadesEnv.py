@@ -23,7 +23,6 @@ class SpadesEnv(gym.Env):
 
         self.action_space = spaces.Discrete(52)
 
-        # reduced to 167 — removed turn position encoding
         self.observation_space = spaces.Box(
             low=0,
             high=1,
@@ -38,7 +37,7 @@ class SpadesEnv(gym.Env):
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        self.game = Game(mode="training")
+        self.game = Game(config={"humans": 0, "rl_agents": 0, "bots": 4})
         first = self.game.players[self.game.first_bidder_index % 4]
         self.current_round = Round(
             self.game.players,
